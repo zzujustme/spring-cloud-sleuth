@@ -16,6 +16,7 @@
 
 package org.springframework.cloud.sleuth.instrument.async;
 
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
@@ -39,7 +40,9 @@ import org.springframework.cloud.sleuth.SpanNamer;
 import org.springframework.lang.Nullable;
 import org.springframework.scheduling.Trigger;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.util.CustomizableThreadCreator;
 import org.springframework.util.ErrorHandler;
+import org.springframework.util.ReflectionUtils;
 import org.springframework.util.concurrent.ListenableFuture;
 
 /**
@@ -53,6 +56,11 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	private final BeanFactory beanFactory;
 	private final ThreadPoolTaskScheduler delegate;
+	private final Method initializeExecutor;
+	private final Method createExecutor;
+	private final Method cancelRemainingTask;
+	private final Method nextThreadName;
+	private final Method getDefaultThreadNamePrefix;
 	private Tracing tracing;
 	private SpanNamer spanNamer;
 
@@ -60,6 +68,23 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 			ThreadPoolTaskScheduler delegate) {
 		this.beanFactory = beanFactory;
 		this.delegate = delegate;
+		this.initializeExecutor = ReflectionUtils.findMethod(ThreadPoolTaskScheduler.class, "initializeExecutor", null);
+		makeAccessibleIfNotNull(this.initializeExecutor);
+		this.createExecutor = ReflectionUtils.findMethod(ThreadPoolTaskScheduler.class, "createExecutor", null);
+		makeAccessibleIfNotNull(this.createExecutor);
+		this.cancelRemainingTask = ReflectionUtils.findMethod(ThreadPoolTaskScheduler.class, "cancelRemainingTask", null);
+		makeAccessibleIfNotNull(this.cancelRemainingTask);
+		this.nextThreadName = ReflectionUtils.findMethod(ThreadPoolTaskScheduler.class, "nextThreadName", null);
+		makeAccessibleIfNotNull(this.nextThreadName);
+		this.getDefaultThreadNamePrefix = ReflectionUtils
+				.findMethod(CustomizableThreadCreator.class, "getDefaultThreadNamePrefix", null);
+		makeAccessibleIfNotNull(this.getDefaultThreadNamePrefix);
+	}
+
+	private void makeAccessibleIfNotNull(Method method) {
+		if (method != null) {
+			ReflectionUtils.makeAccessible(method);
+		}
 	}
 
 	@Override
@@ -79,7 +104,12 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	@Override
 	public ExecutorService initializeExecutor(ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
-		return this.delegate.initializeExecutor(traceThreadFactory(threadFactory), rejectedExecutionHandler);
+		ExecutorService executorService = (ExecutorService) ReflectionUtils
+				.invokeMethod(this.initializeExecutor, this.delegate, traceThreadFactory(threadFactory), rejectedExecutionHandler);
+		if (executorService instanceof TraceableScheduledExecutorService) {
+			return executorService;
+		}
+		return new TraceableExecutorService(this.beanFactory, executorService);
 	}
 
 	private ThreadFactory traceThreadFactory(ThreadFactory threadFactory) {
@@ -88,7 +118,12 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	@Override
 	public ScheduledExecutorService createExecutor(int poolSize, ThreadFactory threadFactory, RejectedExecutionHandler rejectedExecutionHandler) {
-		return this.delegate.createExecutor(poolSize, traceThreadFactory(threadFactory), rejectedExecutionHandler);
+		ScheduledExecutorService executorService = (ScheduledExecutorService) ReflectionUtils
+				.invokeMethod(this.createExecutor, this.delegate, poolSize, traceThreadFactory(threadFactory), rejectedExecutionHandler);
+		if (executorService instanceof TraceableScheduledExecutorService) {
+			return executorService;
+		}
+		return new TraceableScheduledExecutorService(this.beanFactory, executorService);
 	}
 
 	@Override
@@ -100,7 +135,13 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	@Override
 	public ScheduledThreadPoolExecutor getScheduledThreadPoolExecutor() throws IllegalStateException {
-		return this.delegate.getScheduledThreadPoolExecutor();
+		ScheduledThreadPoolExecutor executor = this.delegate.getScheduledThreadPoolExecutor();
+		if (executor instanceof LazyTraceScheduledThreadPoolExecutor) {
+			return executor;
+		}
+		return new LazyTraceScheduledThreadPoolExecutor(executor.getCorePoolSize(),
+				executor.getThreadFactory(), executor
+				.getRejectedExecutionHandler(), this.beanFactory, executor);
 	}
 
 	@Override
@@ -150,7 +191,8 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	@Override
 	public void cancelRemainingTask(Runnable task) {
-		this.delegate.cancelRemainingTask(new TraceRunnable(tracing(), spanNamer(), task));
+		ReflectionUtils
+				.invokeMethod(this.cancelRemainingTask, this.delegate, new TraceRunnable(tracing(), spanNamer(), task));
 	}
 
 	@Override
@@ -292,12 +334,17 @@ public class LazyTraceThreadPoolTaskScheduler extends ThreadPoolTaskScheduler {
 
 	@Override
 	public String nextThreadName() {
-		return this.delegate.nextThreadName();
+		return (String) ReflectionUtils
+				.invokeMethod(this.nextThreadName, this.delegate);
 	}
 
 	@Override
 	public String getDefaultThreadNamePrefix() {
-		return this.delegate.getDefaultThreadNamePrefix();
+		if (this.delegate == null) {
+			return super.getDefaultThreadNamePrefix();
+		}
+		return (String) ReflectionUtils
+				.invokeMethod(this.getDefaultThreadNamePrefix, this.delegate);
 	}
 
 	@Override

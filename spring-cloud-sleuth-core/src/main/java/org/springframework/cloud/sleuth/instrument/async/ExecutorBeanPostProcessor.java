@@ -21,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.function.Supplier;
 
 import org.aopalliance.aop.Advice;
@@ -35,6 +36,7 @@ import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.util.ReflectionUtils;
 
 /**
@@ -69,9 +71,17 @@ class ExecutorBeanPostProcessor implements BeanPostProcessor {
 			throws BeansException {
 		if (bean instanceof ThreadPoolTaskExecutor) {
 			return wrapThreadPoolTaskExecutor(bean);
-		} else if (bean instanceof ExecutorService) {
+		}
+		else if (bean instanceof ThreadPoolTaskScheduler) {
+			return wrapThreadPoolTaskScheduler(bean);
+		}
+		else if (bean instanceof ScheduledThreadPoolExecutor) {
+			return wrapScheduledThreadPoolExecutor(bean);
+		}
+		else if (bean instanceof ExecutorService) {
 			return wrapExecutorService(bean);
-		} else if (bean instanceof Executor) {
+		}
+		else if (bean instanceof Executor) {
 			return wrapExecutor(bean);
 		}
 		return bean;
@@ -108,6 +118,20 @@ class ExecutorBeanPostProcessor implements BeanPostProcessor {
 		return createThreadPoolTaskExecutorProxy(bean, cglibProxy, executor);
 	}
 
+	private Object wrapThreadPoolTaskScheduler(Object bean) {
+		boolean classFinal = Modifier.isFinal(bean.getClass().getModifiers());
+		boolean cglibProxy = !classFinal;
+		ThreadPoolTaskScheduler executor = (ThreadPoolTaskScheduler) bean;
+		return createThreadPoolTaskSchedulerProxy(bean, cglibProxy, executor);
+	}
+
+	private Object wrapScheduledThreadPoolExecutor(Object bean) {
+		boolean classFinal = Modifier.isFinal(bean.getClass().getModifiers());
+		boolean cglibProxy = !classFinal;
+		ScheduledThreadPoolExecutor executor = (ScheduledThreadPoolExecutor) bean;
+		return createScheduledThreadPoolExecutorProxy(bean, cglibProxy, executor);
+	}
+
 	private Object wrapExecutorService(Object bean) {
 		boolean classFinal = Modifier.isFinal(bean.getClass().getModifiers());
 		boolean cglibProxy = !classFinal;
@@ -119,6 +143,20 @@ class ExecutorBeanPostProcessor implements BeanPostProcessor {
 			ThreadPoolTaskExecutor executor) {
 		return getProxiedObject(bean, cglibProxy, executor,
 				() -> new LazyTraceThreadPoolTaskExecutor(this.beanFactory, executor));
+	}
+
+	Object createThreadPoolTaskSchedulerProxy(Object bean, boolean cglibProxy,
+			ThreadPoolTaskScheduler executor) {
+		return getProxiedObject(bean, cglibProxy, executor,
+				() -> new LazyTraceThreadPoolTaskScheduler(this.beanFactory, executor));
+	}
+
+	Object createScheduledThreadPoolExecutorProxy(Object bean, boolean cglibProxy,
+			ScheduledThreadPoolExecutor executor) {
+		return getProxiedObject(bean, cglibProxy, executor,
+				() -> new LazyTraceScheduledThreadPoolExecutor(executor.getCorePoolSize(),
+						executor.getThreadFactory(), executor
+						.getRejectedExecutionHandler(), this.beanFactory, executor));
 	}
 
 	Object createExecutorServiceProxy(Object bean, boolean cglibProxy,
@@ -141,7 +179,8 @@ class ExecutorBeanPostProcessor implements BeanPostProcessor {
 		factory.setTarget(bean);
 		try {
 			return getObject(factory);
-		} catch (Exception e) {
+		}
+		catch (Exception e) {
 			if (log.isDebugEnabled()) {
 				log.debug("Exception occurred while trying to get a proxy. Will fallback to a different implementation", e);
 			}
@@ -180,7 +219,8 @@ class ExecutorMethodInterceptor<T extends Executor> implements MethodInterceptor
 		if (methodOnTracedBean != null) {
 			try {
 				return methodOnTracedBean.invoke(executor, invocation.getArguments());
-			} catch (InvocationTargetException ex) {
+			}
+			catch (InvocationTargetException ex) {
 				// gh-1092: throw the target exception (if present)
 				Throwable cause = ex.getCause();
 				throw (cause != null) ? cause : ex;
